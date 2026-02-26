@@ -2,8 +2,8 @@ import httpx
 from fastapi import HTTPException
 from typing import List
 
-from backend.config import AI_SERVICE_URL
-from backend.models import (
+from backend.backend.config import AI_SERVICE_URL
+from backend.backend.models import (
     DrugInfo, DesignOption,
     SampleSizeRequest, SampleSizeResult,
     InclusionCriteriaRequest, InclusionCriteriaResult,
