@@ -1,14 +1,131 @@
 '''ЗДЕСЬ БУДУТ НАХОДИТЬСЯ ФУНКЦИИ ДЛЯ ИСПОЛЬЗОВАНИЯ ПРИ ГЕНЕРАЦИИ ДОКУМЕНТА'''
 
 from llm_services import LLM, LLM_WEB
+import re
+
+# Универсальная функция для парсинга ответов LLM
+def parse_llm_response(result, expected_fields, patterns=None, is_numeric=False):
+    """
+    Парсит ответ LLM и извлекает значения для указанных полей
+    
+    Args:
+        result: сырой ответ от LLM
+        expected_fields: список ожидаемых полей
+        patterns: словарь с паттернами для поиска (опционально)
+        is_numeric: ожидаются ли числовые значения
+    
+    Returns:
+        словарь с извлеченными значениями
+    """
+    
+    if patterns is None:
+        # Стандартные паттерны для поиска
+        patterns = {
+            # Фармакокинетические параметры
+            "cv_intra_value": r'CVintra[^\d]*(\d+[.,]?\d*)',
+            "pk_cmax": r'Cmax[^\d]*(\d+[.,]?\d*)',
+            "pk_auc0": r'AUC[^\d]*(\d+[.,]?\d*)',
+            "half_life_hours": r'(период полувыведения|T\s?1/2|half-life)[^\d]*(\d+[.,]?\d*)',
+            "washout_days": r'(отмывочный период|washout)[^\d]*(\d+[.,]?\d*)',
+            
+            # Дизайн исследования
+            "intake_time": r'(режим приема|intake time)[:\s]*([^/\n]+)',
+            "dosing_regimen_ru": r'(количество приемов|dosing regimen)[:\s]*([^/\n]+)',
+            "study_design": r'(дизайн исследования|study design)[:\s]*([^/\n]+)',
+            
+            # Периоды и длительности
+            "sampling_type": r'(размер выборки|sample size)[:\s]*(\d+)',
+            "screening_duration_days": r'(длительность скрининга|screening duration)[:\s]*(\d+)',
+            "pk_period_duration_days": r'(длительность[^\d]*ФК|pk period duration)[^\d]*(\d+)',
+            "follow_up_duration_days": r'(последующее наблюдение|follow.up)[^\d]*(\d+)',
+            "period2_dosing_day": r'(вторая доза|second dose)[^\d]*(\d+)',
+            "fasting_hours": r'(натощак|fasting)[^\d]*(\d+)',
+            "water_volume_ml": r'(вода|water)[^\d]*(\d+)',
+            "center_stay_hours": r'(в центре|center stay)[^\d]*(\d+)',
+            
+            # Забор крови
+            "blood_samples_count": r'(количество точек|blood samples? count)[^\d]*(\d+)',
+            "sample_volume_ml": r'(объем[^\d]*образце|sample volume)[^\d]*(\d+[.,]?\d*)',
+            "samples_per_period": r'(образцов[^\d]*периоде|samples per period)[^\d]*(\d+)',
+            "volume_sample": r'(общий объем|total volume)[^\d]*(\d+[.,]?\d*)',
+            "volume_sample_per_period": r'(объем[^\d]*период|volume per period)[^\d]*(\d+[.,]?\d*)',
+            "pre_dosing_minutes": r'(до[^\d]*приема|pre.dose)[^\d]*(\d+)',
+            "post_dosing_minutes": r'(после[^\d]*приема[^\d]*минут|post.dose.*min)[^\d]*(\d+)',
+            "post_dosing_hours": r'(после[^\d]*приема[^\d]*часов|post.dose.*hour)[^\d]*(\d+)',
+            
+            # Набор пациентов
+            "dropout_rate": r'(выбывание|dropout)[^\d]*(\d+[.,]?\d*)',
+            "total_enrolled": r'(включено|enrolled)[^\d]*(\d+)',
+            "screening_failure_rate": r'(скрининг[^\d]*неудач|screening failure)[^\d]*(\d+[.,]?\d*)',
+            "total_screened": r'(прошли скрининг|screened)[^\d]*(\d+)',
+            
+            # Названия
+            "inn_ref": r'(название[^\d]*дженерик|inn)[:\s]*([^/\n]+)',
+            "reference_product_name": r'(референтный препарат|reference product)[:\s]*([^/\n]+)',
+            
+            # Дизайн (текстовые варианты)
+            "study_design_groups": r'(групп[аы]|groups?)[:\s]*([^/\n]+)',
+            "study_design_period": r'(период[аы]|periods?)[:\s]*([^/\n]+)',
+            "study_design_2per": r'(двух периодах|two periods)[:\s]*([^/\n]+)',
+            "study_design_expl": r'(рандомизац|randomization)[:\s]*([^/\n]+)',
+        }
+    
+    parsed_data = {}
+    
+    # Сначала пытаемся найти по паттернам
+    for field in expected_fields:
+        pattern = patterns.get(field)
+        if pattern:
+            match = re.search(pattern, result, re.IGNORECASE)
+            if match:
+                # Берем последнюю группу (там обычно значение)
+                value = match.group(match.lastindex or 1)
+                
+                # Для числовых значений очищаем от лишних символов
+                if is_numeric or any(x in field for x in ['value', 'cmax', 'auc', 'days', 'hours', 'ml', 'count', 'volume', 'rate']):
+                    # Оставляем только цифры, точку и запятую
+                    value = re.sub(r'[^\d.,]', '', value)
+                    value = value.replace(',', '.')
+                    # Если после очистки осталась пустая строка, значит это не число
+                    if not value:
+                        value = "NODATA"
+                else:
+                    value = value.strip()
+                
+                parsed_data[field] = value
+            else:
+                parsed_data[field] = "NODATA"
+        else:
+            parsed_data[field] = "NODATA"
+    
+    # Если не нашли по паттернам, пробуем разделить по слэшам
+    if all(v == "NODATA" for v in parsed_data.values()) and '/' in result:
+        splited = [x.strip() for x in result.split('/')]
+        for i, field in enumerate(expected_fields):
+            if i < len(splited):
+                value = splited[i]
+                # Очищаем от лишних символов и ссылок
+                value = re.sub(r'\[.*?\]\(.*?\)', '', value)  # убираем markdown ссылки
+                value = re.sub(r'https?://\S+', '', value)    # убираем URL
+                parsed_data[field] = value.strip()
+    
+    # Финальная очистка
+    for field in parsed_data:
+        if parsed_data[field] != "NODATA":
+            # Убираем множественные пробелы
+            parsed_data[field] = re.sub(r'\s+', ' ', parsed_data[field])
+            # Обрезаем
+            parsed_data[field] = parsed_data[field][:200] if len(parsed_data[field]) > 200 else parsed_data[field]
+    
+    return parsed_data
 
 #Тестовый запрос
 def test_query(city:str)->str:
     question = LLM('В какой стране находится город {}? Ответь кратко.')
-    return({"Answer":question})
+    return({"Answer": question})
 
 #Выполнение поиска в сети и генерация международного непатентованного названия на основе референса и активного вещества
-def drug_gen_naming(reference_product_name:str, active_substance:str, dosage_form:str, dosage:float)->str:
+def drug_gen_naming(reference_product_name:str, active_substance:str, dosage_form:str, dosage:str)->str:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -21,11 +138,13 @@ def drug_gen_naming(reference_product_name:str, active_substance:str, dosage_for
         Референтный препарат: Название - {reference_product_name}.'''
     
     result = LLM_WEB(prompt)
-
-    return({"inn_ref":result})
+    
+    # Парсим результат
+    parsed = parse_llm_response(result, ["inn_ref"])
+    return({"inn_ref": parsed["inn_ref"]})
 
 #Поиск по литературе референтного препарата по заданному действующему веществу
-def drug_reference_name_generation(active_substance:str, dosage_form:str, dosage:float)->str:
+def drug_reference_name_generation(active_substance:str, dosage_form:str, dosage:str)->str:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -37,11 +156,13 @@ def drug_reference_name_generation(active_substance:str, dosage_form:str, dosage
         Препарат Дженерик: Действующее вещество - {active_substance}. Лекарственная форма - {dosage_form}. Дозировка - {dosage}.'''
     
     result = LLM_WEB(prompt)
-
-    return({"reference_product_name":result})
+    
+    # Парсим результат
+    parsed = parse_llm_response(result, ["reference_product_name"])
+    return({"reference_product_name": parsed["reference_product_name"]})
 
 #Поиск фармокинетических параметров референтного препарата из статей
-def drug_reference_farmoken_params(reference_product_name:str, active_substance:str, dosage_form:str, dosage:float)->dict:
+def drug_reference_farmoken_params(reference_product_name:str, active_substance:str, dosage_form:str, dosage:str)->dict:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -50,22 +171,21 @@ def drug_reference_farmoken_params(reference_product_name:str, active_substance:
         1) Найти коэффициент внутрииндивидуальной вариабельности фармакокинетических параметров (CVintra) для референтного препарата в процентах.
         2) Найти максимальную концентрацию в плазме (Cmax) референтного препарата в единицах измерения нг/мл.
         3) Найти площадь под кривой концентрация-время (AUC) референтного препарата в единицах измерения нг-ч/мл.
+        4) Найти период полувыведения (T 1/2) препарата-дженерика.
+        5) Рассчитать отмывочный период препарата-дженерика (По стандарту длительность отмывочного периода превышает длительность 5-ти периодов полувыведения)
     Ответ на каждое задание давай через знак слэша (/). Если ответ не был найден, то не ври и не придумывай - вместо ответа напиши NODATA.
     Информация: 
         Препарат Дженерик: Действующее вещество - {active_substance}. Лекарственная форма - {dosage_form}. Дозировка - {dosage}.
         Референтный препарат: Название - {reference_product_name}.'''
     
     result = LLM_WEB(prompt)
-    splited_result = result.split('/')
-
-    return({
-        "cv_intra_value":splited_result[0],
-        "pk_cmax":splited_result[1],
-        "pk_auc0":splited_result[2]
-    })
+    
+    # Парсим результат
+    expected_fields = ["cv_intra_value", "pk_cmax", "pk_auc0", "half_life_hours", "washout_days"]
+    return parse_llm_response(result, expected_fields, is_numeric=True)
 
 #На основе вводных данных по дженерику (длительность омывочного периода, название референтного препарата, активного вещества) генерация метрик для проведения дизайна исследования и самого дизайна исследования (режим приема, дозировка, дизайн исследования)
-def study_design_and_metrics_generation(washout_days:int, reference_product_name:str, active_substance:str, dosage_form:str, dosage:float)->dict:
+def study_design_and_metrics_generation(washout_days:str, reference_product_name:str, active_substance:str, dosage_form:str, dosage:str)->dict:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -80,13 +200,10 @@ def study_design_and_metrics_generation(washout_days:int, reference_product_name
         Референтный препарат: Название - {reference_product_name}.'''
     
     result = LLM_WEB(prompt)
-    splited_result = result.split('/')
     
-    return({
-        "intake_time":splited_result[0],
-        "dosing_regimen_ru":splited_result[1],
-        "study_design":splited_result[2]
-    })
+    # Парсим результат
+    expected_fields = ["intake_time", "dosing_regimen_ru", "study_design"]
+    return parse_llm_response(result, expected_fields)
 
 #Генерация переформулированных версий study_design (в тексте он встречается несколько раз, но звучит по-разному)
 def study_design_other_generation(study_design:str)->dict:
@@ -104,17 +221,13 @@ def study_design_other_generation(study_design:str)->dict:
         Дизайн исследования: Текст - {study_design}.'''
     
     result = LLM_WEB(prompt)
-    splited_result = result.split('/')
-
-    return({
-        "study_design_groups":splited_result[0],
-        "study_design_period":splited_result[1],
-        "study_design_2per":splited_result[2],
-        "study_design_expl":splited_result[3]
-    })
+    
+    # Парсим результат
+    expected_fields = ["study_design_groups", "study_design_period", "study_design_2per", "study_design_expl"]
+    return parse_llm_response(result, expected_fields)
 
 #На основе данных по исследованию (дизайн, омывочный период, кол-во выборки, активное вещество, режим приема, частота применения) производится генерация метрик скрининга в научном центре (длительность скрининга, длительность ФК, длительность последующего исследования, сколько дней после приема пищи, сколько воды запивать, кол-во дней в центре)
-def screening_design_and_metrics_generation(reference_product_name:str, study_design:str, washout_days:str, active_substance:str, dosage_form:str, dosage:float, intake_time:str, dosing_regimen_ru:str)->dict:
+def screening_design_and_metrics_generation(reference_product_name:str, study_design:str, washout_days:str, active_substance:str, dosage_form:str, dosage:str, intake_time:str, dosing_regimen_ru:str)->dict:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -136,22 +249,17 @@ def screening_design_and_metrics_generation(reference_product_name:str, study_de
         Референтный препарат: Название - {reference_product_name}.'''
     
     result = LLM_WEB(prompt)
-    splited_result = result.split('/')
-
-    return({
-        "sampling_type":splited_result[0],
-        "screening_duration_days":splited_result[1],
-        "pk_period_duration_days":splited_result[2],
-        "follow_up_duration_days":splited_result[3],
-        "period2_dosing_day":splited_result[4],
-        "fasting_hours":splited_result[5],
-        "water_volume_ml":splited_result[6],
-        "center_stay_hours":splited_result[7],
-        "period2_dosing_day_n":splited_result[8]
-    })
+    
+    # Парсим результат
+    expected_fields = [
+        "sampling_type", "screening_duration_days", "pk_period_duration_days", 
+        "follow_up_duration_days", "period2_dosing_day", "fasting_hours", 
+        "water_volume_ml", "center_stay_hours", "period2_dosing_day_n"
+    ]
+    return parse_llm_response(result, expected_fields, is_numeric=True)
 
 #На основании данных по исследованию, выборке и препарату мы генерируем данные для сбора крови (кол-во точек, объем, кол-во образцов в периоде, общий объем, общий объем в период, время сбора крови до и после приема препарата)
-def blood_samples_info_generation(reference_product_name:str, washout_days:int, study_design:str, sampling_type:str, active_substance:str, dosage_form:str, dosage:float, intake_time:str, dosing_regimen_ru:str, screening_duration_days:int)->dict:
+def blood_samples_info_generation(reference_product_name:str, washout_days:str, study_design:str, sampling_type:str, active_substance:str, dosage_form:str, dosage:str, intake_time:str, dosing_regimen_ru:str, screening_duration_days:str)->dict:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -173,21 +281,17 @@ def blood_samples_info_generation(reference_product_name:str, washout_days:int, 
         Скрининг: Длительность периода скрининга - {screening_duration_days}'''
     
     result = LLM_WEB(prompt)
-    splited_result = result.split('/')
-
-    return({
-        "blood_samples_count":splited_result[0],
-        "sample_volume_ml":splited_result[1],
-        "samples_per_period":splited_result[2],
-        "volume_sample":splited_result[3],
-        "volume_sample_per_period":splited_result[4],
-        "pre_dosing_minutes":splited_result[5],
-        "post_dosing_minutes":splited_result[6],
-        "post_dosing_hours":splited_result[7]
-    })
+    
+    # Парсим результат
+    expected_fields = [
+        "blood_samples_count", "sample_volume_ml", "samples_per_period", 
+        "volume_sample", "volume_sample_per_period", "pre_dosing_minutes", 
+        "post_dosing_minutes", "post_dosing_hours"
+    ]
+    return parse_llm_response(result, expected_fields, is_numeric=True)
 
 #Расчет объемов выборки (ЛИБО R, ЛИБО ИИ)
-def enroll_info(cv_intra_value:float, study_design:str, washout_days:str, sampling_type:str, active_substance:str, intake_time:str, dosing_regimen_ru:str, dosage_form:str, dosage:str, reference_product_name:str, pk_cmax:float, pk_auc0:float)->dict:
+def enroll_info(cv_intra_value:float, study_design:str, washout_days:str, sampling_type:str, active_substance:str, intake_time:str, dosing_regimen_ru:str, dosage_form:str, dosage:str, reference_product_name:str, pk_cmax:str, pk_auc0:str)->dict:
     prompt = f'''Ты специалист-биолог и исследователь в сфере биоэквивалентности. 
     На основе выданной информации четко выполни задание и дай точный ответ. 
     Не комментируй, отвечай максимально кратко. 
@@ -210,11 +314,7 @@ def enroll_info(cv_intra_value:float, study_design:str, washout_days:str, sampli
         Референтный препарат: Название - {reference_product_name}. Максимальня концентрация в плазме (Cmax) - {pk_cmax}. Площадь под кривой концентрация-время (AUC) - {pk_auc0}. Внутрисубъектная вариабельность (CVintra) - {cv_intra_value}.'''
     
     result = LLM_WEB(prompt)
-    splited_result = result.split('/')
-
-    return({
-        "dropout_rate":splited_result[0],
-        "total_enrolled":splited_result[1],
-        "screening_failure_rate":splited_result[2],
-        "total_screened":splited_result[3]
-    })
+    
+    # Парсим результат
+    expected_fields = ["dropout_rate", "total_enrolled", "screening_failure_rate", "total_screened"]
+    return parse_llm_response(result, expected_fields, is_numeric=True)
