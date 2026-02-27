@@ -31,7 +31,7 @@ npm install
 ```bash
 pip install -r requirements.txt
 ```
-Далее создайте '.env' файл в папке ./backend и заполните поля для подключения к вашему API для ИИ: `NEURO_API, LLM_TYPE, CRAWLBASE_TOKEN`
+Далее создайте '.env' файл в папке ./backend и заполните поля для подключения к вашему API для ИИ: `NEURO_API, LLM_TYPE`
 
 Также не забудьте изменить параметры подключения к серверу и CORS в main.py
 
